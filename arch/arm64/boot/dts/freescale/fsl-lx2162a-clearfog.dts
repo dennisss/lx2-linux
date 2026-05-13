@@ -367,7 +367,12 @@
 	status = "okay";
 };
 
+&serdes_1 {
+	compatible = "fsl,lx2162a-serdes1", "fsl,lynx-28g";
+};
+
 &serdes_2 {
+	compatible = "fsl,lx2162a-serdes2", "fsl,lynx-28g";
 	status = "okay";
 };
 
