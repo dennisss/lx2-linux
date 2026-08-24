@@ -229,7 +229,7 @@ static void sfp_module_parse_support(struct sfp_bus *bus,
 	switch (id->base.extended_cc) {
 	case SFF8024_ECC_UNSPEC:
 		break;
-	case SFF8024_ECC_100G_25GAUI_C2M_AOC:
+	case SFF8024_ECC_100G_25GAUI_C2M_AOC_BER_5E_5:
 		if (br_min <= 28000 && br_max >= 25000) {
 			/* 25GBASE-R, possibly with FEC */
 			__set_bit(PHY_INTERFACE_MODE_25GBASER, interfaces);
