@@ -4853,6 +4853,39 @@ static void dpaa2_eth_free_rx_xdp_rxq(struct dpaa2_eth_priv *priv)
 	}
 }
 
+/*
+ * The MAC endpoint's device tree node can provide a MAC address (e.g. a
+ * "mac-address" nvmem cell from an ONIE TLV EEPROM). When present it takes
+ * precedence over the address handed down by the firmware/bootloader and over
+ * the random fallback chosen by dpaa2_eth_set_mac_addr().
+ */
+static int dpaa2_eth_set_dt_mac_addr(struct dpaa2_eth_priv *priv)
+{
+	struct net_device *net_dev = priv->net_dev;
+	u8 addr[ETH_ALEN];
+	int err;
+
+	if (!priv->mac || !is_of_node(priv->mac->fw_node))
+		return 0;
+
+	err = of_get_mac_address(to_of_node(priv->mac->fw_node), addr);
+	if (err == -EPROBE_DEFER)
+		return err;
+	if (err)
+		return 0;
+
+	err = dpni_set_primary_mac_addr(priv->mc_io, 0, priv->mc_token, addr);
+	if (err) {
+		netdev_err(net_dev, "dpni_set_primary_mac_addr() failed\n");
+		return err;
+	}
+
+	eth_hw_addr_set(net_dev, addr);
+	net_dev->addr_assign_type = NET_ADDR_PERM;
+
+	return 0;
+}
+
 static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 {
 	struct device *dev;
@@ -4988,6 +5021,10 @@ static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 	err = dpaa2_eth_connect_mac(priv);
 	if (err)
 		goto err_connect_mac;
+
+	err = dpaa2_eth_set_dt_mac_addr(priv);
+	if (err)
+		goto err_poll_thread;
 
 	err = dpaa2_eth_setup_irqs(dpni_dev);
 	if (err) {

@@ -34,6 +34,9 @@ struct dpaa2_mac {
 	struct fwnode_handle *fw_node;
 
 	struct phy *serdes_phy;
+	/* Additional lane PHYs (e.g. retimer channels) following the SerDes */
+	struct phy **retimer_phys;
+	int num_retimer_phys;
 
 	struct dpaa2_mac_stats ethtool_stats;
 	struct dpaa2_mac_stats rmon_stats;

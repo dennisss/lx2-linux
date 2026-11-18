@@ -113,6 +113,7 @@
 
 /* Lane a Rx General Control Register */
 #define LNaRGCR0(lane)				(0x800 + (lane) * 0x100 + 0x44)
+#define LNaRGCR0_DAT_INV			BIT(31)
 #define LNaRGCR0_USE_PLL			BIT(28)
 #define LNaRGCR0_USE_PLLF			0x0
 #define LNaRGCR0_USE_PLLS			0x1
@@ -483,6 +484,7 @@ struct lynx_28g_lane {
 	struct phy *phy;
 	bool powered_up;
 	bool init;
+	bool rx_invert;
 	unsigned int id;
 	enum lynx_lane_mode mode;
 };
@@ -811,6 +813,11 @@ static int lynx_28g_power_on(struct phy *phy)
 	lynx_28g_lane_rmw(lane, LNaRRSTCTL, 0, LNaRRSTCTL_DIS);
 	lynx_28g_lane_rmw(lane, LNaTRSTCTL, 0, LNaTRSTCTL_DIS);
 
+	/* RX polarity is fully determined by the device tree */
+	lynx_28g_lane_rmw(lane, LNaRGCR0,
+			  lane->rx_invert ? LNaRGCR0_DAT_INV : 0,
+			  LNaRGCR0_DAT_INV);
+
 	err = lynx_28g_lane_reset(phy);
 	if (err)
 		return err;
@@ -1132,6 +1139,10 @@ static void lynx_28g_lane_change_proto_conf(struct lynx_28g_lane *lane,
 
 	lynx_28g_lane_write(lane, LNaRCCR0, conf->rccr0);
 	lynx_28g_lane_write(lane, LNaTTLCR0, conf->ttlcr0);
+
+	lynx_28g_lane_rmw(lane, LNaRGCR0,
+			  lane->rx_invert ? LNaRGCR0_DAT_INV : 0,
+			  LNaRGCR0_DAT_INV);
 }
 
 static int lynx_28g_lane_disable_pcvt(struct lynx_28g_lane *lane,
@@ -1443,6 +1454,7 @@ static int lynx_28g_probe_lane(struct lynx_28g_priv *priv, int id,
 {
 	struct lynx_28g_lane *lane = &priv->lane[id];
 	struct phy *phy;
+	u32 rx_inv_mask = 0;
 
 	phy = devm_phy_create(priv->dev, dn, &lynx_28g_ops);
 	if (IS_ERR(phy))
@@ -1451,6 +1463,12 @@ static int lynx_28g_probe_lane(struct lynx_28g_priv *priv, int id,
 	lane->priv = priv;
 	lane->phy = phy;
 	lane->id = id;
+	if (dn && of_property_read_bool(dn, "fsl,rx-polarity-invert"))
+		lane->rx_invert = true;
+	if (!of_property_read_u32(dev_of_node(priv->dev),
+				  "fsl,rx-invert-lane-mask", &rx_inv_mask) &&
+	    (rx_inv_mask & BIT(id)))
+		lane->rx_invert = true;
 	phy_set_drvdata(phy, lane);
 	lynx_28g_lane_read_configuration(lane);
 

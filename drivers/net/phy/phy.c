@@ -1606,7 +1606,7 @@ static enum phy_state_work _phy_state_machine(struct phy_device *phydev)
 		func = &_phy_start_aneg;
 	}
 
-	if (err == -ENODEV)
+	if (err == -ENODEV || err == -ENXIO)
 		return state_work;
 
 	if (err < 0)

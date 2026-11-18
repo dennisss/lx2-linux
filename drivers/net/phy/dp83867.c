@@ -188,6 +188,10 @@ struct dp83867_private {
 	bool set_clk_output;
 	u32 clk_output_sel;
 	bool sgmii_ref_clk_en;
+	bool has_ledcr1;
+	u32 ledcr1;
+	bool has_ledcr2;
+	u32 ledcr2;
 };
 
 static int dp83867_ack_interrupt(struct phy_device *phydev)
@@ -580,6 +584,12 @@ static int dp83867_of_init(struct phy_device *phydev)
 	dp83867->rxctrl_strap_quirk = of_property_read_bool(of_node,
 							    "ti,dp83867-rxctrl-strap-quirk");
 
+	if (!of_property_read_u32(of_node, "ti,ledcr1", &dp83867->ledcr1))
+		dp83867->has_ledcr1 = true;
+
+	if (!of_property_read_u32(of_node, "ti,ledcr2", &dp83867->ledcr2))
+		dp83867->has_ledcr2 = true;
+
 	dp83867->sgmii_ref_clk_en = of_property_read_bool(of_node,
 							  "ti,sgmii-ref-clock-output-enable");
 
@@ -698,6 +708,7 @@ static int dp83867_resume(struct phy_device *phydev)
 static int dp83867_probe(struct phy_device *phydev)
 {
 	struct dp83867_private *dp83867;
+	int ret;
 
 	dp83867 = devm_kzalloc(&phydev->mdio.dev, sizeof(*dp83867),
 			       GFP_KERNEL);
@@ -706,7 +717,21 @@ static int dp83867_probe(struct phy_device *phydev)
 
 	phydev->priv = dp83867;
 
-	return dp83867_of_init(phydev);
+	ret = dp83867_of_init(phydev);
+	if (ret)
+		return ret;
+
+	if (dp83867->rxctrl_strap_quirk)
+		phy_clear_bits_mmd(phydev, DP83867_DEVADDR, DP83867_CFG4,
+				   BIT(7));
+
+	if (dp83867->has_ledcr1)
+		phy_write(phydev, DP83867_LEDCR1, dp83867->ledcr1);
+
+	if (dp83867->has_ledcr2)
+		phy_write(phydev, DP83867_LEDCR2, dp83867->ledcr2);
+
+	return 0;
 }
 
 static int dp83867_config_init(struct phy_device *phydev)
@@ -841,6 +866,9 @@ static int dp83867_config_init(struct phy_device *phydev)
 		if (dp83867->rxctrl_strap_quirk)
 			phy_set_bits_mmd(phydev, DP83867_DEVADDR, DP83867_CFG4,
 					 BIT(8));
+
+		/* Ensure Auto-Negotiation is enabled in BMCR even if strapped off by LED_2 */
+		phy_set_bits(phydev, MII_BMCR, BMCR_ANENABLE);
 	}
 
 	val = phy_read(phydev, DP83867_CFG3);
@@ -853,6 +881,12 @@ static int dp83867_config_init(struct phy_device *phydev)
 
 	if (dp83867->port_mirroring != DP83867_PORT_MIRROING_KEEP)
 		dp83867_config_port_mirroring(phydev);
+
+	if (dp83867->has_ledcr1)
+		phy_write(phydev, DP83867_LEDCR1, dp83867->ledcr1);
+
+	if (dp83867->has_ledcr2)
+		phy_write(phydev, DP83867_LEDCR2, dp83867->ledcr2);
 
 	/* Clock output selection if muxing property is set */
 	if (dp83867->set_clk_output) {
@@ -868,6 +902,11 @@ static int dp83867_config_init(struct phy_device *phydev)
 
 		phy_modify_mmd(phydev, DP83867_DEVADDR, DP83867_IO_MUX_CFG,
 			       mask, val);
+	}
+
+	if (phydev->interface == PHY_INTERFACE_MODE_SGMII) {
+		phy_set_bits(phydev, DP83867_CTRL, DP83867_SW_RESTART);
+		usleep_range(10, 20);
 	}
 
 	return 0;

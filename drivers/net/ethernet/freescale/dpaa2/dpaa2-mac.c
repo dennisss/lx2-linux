@@ -358,7 +358,7 @@ static void dpaa2_mac_config(struct phylink_config *config, unsigned int mode,
 {
 	struct dpaa2_mac *mac = phylink_to_dpaa2_mac(config);
 	struct dpmac_link_state *dpmac_state = &mac->state;
-	int err;
+	int err, i;
 
 	if (linkmode_test_bit(ETHTOOL_LINK_MODE_Autoneg_BIT,
 			      state->advertising))
@@ -384,6 +384,14 @@ static void dpaa2_mac_config(struct phylink_config *config, unsigned int mode,
 	err = phy_set_mode_ext(mac->serdes_phy, PHY_MODE_ETHERNET, state->interface);
 	if (err)
 		netdev_err(mac->net_dev, "phy_set_mode_ext() = %d\n", err);
+
+	for (i = 0; i < mac->num_retimer_phys; i++) {
+		err = phy_set_mode_ext(mac->retimer_phys[i], PHY_MODE_ETHERNET,
+				       state->interface);
+		if (err)
+			netdev_err(mac->net_dev,
+				   "retimer %d phy_set_mode_ext() = %d\n", i, err);
+	}
 }
 
 static void dpaa2_mac_link_up(struct phylink_config *config,
@@ -557,6 +565,79 @@ void dpaa2_mac_stop(struct dpaa2_mac *mac)
 }
 EXPORT_SYMBOL_GPL(dpaa2_mac_stop);
 
+static void dpaa2_mac_put_retimer_phys(struct dpaa2_mac *mac)
+{
+	int i;
+
+	for (i = 0; i < mac->num_retimer_phys; i++) {
+		phy_exit(mac->retimer_phys[i]);
+		of_phy_put(mac->retimer_phys[i]);
+	}
+	kfree(mac->retimer_phys);
+	mac->retimer_phys = NULL;
+	mac->num_retimer_phys = 0;
+}
+
+/*
+ * Besides the SerDes lane, the "phys" property of a dpmac node may list
+ * further lane PHYs sitting between the SerDes and the connector, such as
+ * retimer channels (one per direction for a crosspoint retimer). Those must
+ * be named in "phy-names"; every entry other than "serdes" is treated as a
+ * retimer channel and follows the SerDes protocol on each mac_config():
+ *
+ *	phys = <&serdes_1 7>, <&retimer0 0>, <&retimer0 1>;
+ *	phy-names = "serdes", "retimer-tx", "retimer-rx";
+ *
+ * A multi-channel retimer can be shared between ports, each port simply
+ * references its own channels.
+ */
+static int dpaa2_mac_get_retimer_phys(struct dpaa2_mac *mac,
+				      struct device_node *np)
+{
+	const char *name;
+	struct phy *phy;
+	int count, i, err;
+
+	count = of_property_count_strings(np, "phy-names");
+	if (count <= 0)
+		return 0;
+
+	mac->retimer_phys = kcalloc(count, sizeof(*mac->retimer_phys),
+				    GFP_KERNEL);
+	if (!mac->retimer_phys)
+		return -ENOMEM;
+
+	for (i = 0; i < count; i++) {
+		err = of_property_read_string_index(np, "phy-names", i, &name);
+		if (err)
+			goto err_put;
+		if (!strcmp(name, "serdes"))
+			continue;
+
+		phy = of_phy_get(np, name);
+		if (IS_ERR(phy)) {
+			err = PTR_ERR(phy);
+			if (err != -EPROBE_DEFER)
+				netdev_err(mac->net_dev,
+					   "failed to get %s phy: %d\n", name, err);
+			goto err_put;
+		}
+
+		err = phy_init(phy);
+		if (err) {
+			of_phy_put(phy);
+			goto err_put;
+		}
+		mac->retimer_phys[mac->num_retimer_phys++] = phy;
+	}
+
+	return 0;
+
+err_put:
+	dpaa2_mac_put_retimer_phys(mac);
+	return err;
+}
+
 int dpaa2_mac_connect(struct dpaa2_mac *mac)
 {
 	struct net_device *net_dev = mac->net_dev;
@@ -581,7 +662,14 @@ int dpaa2_mac_connect(struct dpaa2_mac *mac)
 	if (mac->features & DPAA2_MAC_FEATURE_PROTOCOL_CHANGE &&
 	    !phy_interface_mode_is_rgmii(mac->if_mode) &&
 	    is_of_node(dpmac_node)) {
-		serdes_phy = of_phy_get(to_of_node(dpmac_node), NULL);
+		struct device_node *np = to_of_node(dpmac_node);
+		const char *con_id = NULL;
+
+		/* Without phy-names the SerDes lane is the first phys entry */
+		if (of_property_match_string(np, "phy-names", "serdes") >= 0)
+			con_id = "serdes";
+
+		serdes_phy = of_phy_get(np, con_id);
 
 		if (serdes_phy == ERR_PTR(-ENODEV))
 			serdes_phy = NULL;
@@ -589,6 +677,14 @@ int dpaa2_mac_connect(struct dpaa2_mac *mac)
 			return PTR_ERR(serdes_phy);
 		else
 			phy_init(serdes_phy);
+
+		if (serdes_phy) {
+			err = dpaa2_mac_get_retimer_phys(mac, np);
+			if (err) {
+				of_phy_put(serdes_phy);
+				return err;
+			}
+		}
 	}
 	mac->serdes_phy = serdes_phy;
 
@@ -601,7 +697,8 @@ int dpaa2_mac_connect(struct dpaa2_mac *mac)
 	     mac->if_mode == PHY_INTERFACE_MODE_RGMII_RXID ||
 	     mac->if_mode == PHY_INTERFACE_MODE_RGMII_TXID)) {
 		netdev_err(net_dev, "RGMII delay not supported\n");
-		return -EINVAL;
+		err = -EINVAL;
+		goto err_put_phys;
 	}
 
 	if ((mac->attr.link_type == DPMAC_LINK_TYPE_PHY &&
@@ -609,7 +706,7 @@ int dpaa2_mac_connect(struct dpaa2_mac *mac)
 	    mac->attr.link_type == DPMAC_LINK_TYPE_BACKPLANE) {
 		err = dpaa2_pcs_create(mac, dpmac_node, mac->attr.id);
 		if (err)
-			return err;
+			goto err_put_phys;
 	}
 
 	memset(&mac->phylink_config, 0, sizeof(mac->phylink_config));
@@ -645,6 +742,10 @@ err_phylink_destroy:
 	phylink_destroy(mac->phylink);
 err_pcs_destroy:
 	dpaa2_pcs_destroy(mac);
+err_put_phys:
+	dpaa2_mac_put_retimer_phys(mac);
+	of_phy_put(mac->serdes_phy);
+	mac->serdes_phy = NULL;
 
 	return err;
 }
@@ -658,6 +759,7 @@ void dpaa2_mac_disconnect(struct dpaa2_mac *mac)
 
 	phylink_destroy(mac->phylink);
 	dpaa2_pcs_destroy(mac);
+	dpaa2_mac_put_retimer_phys(mac);
 	of_phy_put(mac->serdes_phy);
 	mac->serdes_phy = NULL;
 }

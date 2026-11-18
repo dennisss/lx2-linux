@@ -1,0 +1,306 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+//
+// Device Tree file for LX2160A COM Express Type 7 Router carrier board
+//
+// Copyright 2026 SolidRun Ltd.
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/linux-event-codes.h>
+
+#include "fsl-lx2160a-rev2.dtsi"
+#include "fsl-lx2160a-cex7.dtsi"
+
+/ {
+	model = "SolidRun LX2160A COM Express Type 7 Router";
+	compatible = "solidrun,router", "solidrun,lx2160a-cex7", "fsl,lx2160a";
+
+	aliases {
+		mmc0 = &esdhc0;
+		mmc1 = &esdhc1;
+		serial0 = &uart0;
+		serial1 = &uart1;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		key {
+			label = "power";
+			linux,can-disable;
+			linux,code = <KEY_POWER>;
+			gpios = <&gpio2 6 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	sfp0: sfp-0 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp0_i2c>;
+		mod-def0-gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;
+		maximum-power-milliwatt = <2000>;
+	};
+
+	sfp1: sfp-1 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp1_i2c>;
+		mod-def0-gpios = <&gpio2 9 GPIO_ACTIVE_LOW>;
+		maximum-power-milliwatt = <2000>;
+	};
+
+	sfp2: sfp-2 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp2_i2c>;
+		mod-def0-gpios = <&gpio2 10 GPIO_ACTIVE_LOW>;
+		maximum-power-milliwatt = <2000>;
+	};
+
+	sfp3: sfp-3 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp3_i2c>;
+		mod-def0-gpios = <&gpio2 11 GPIO_ACTIVE_LOW>;
+		maximum-power-milliwatt = <2000>;
+	};
+};
+
+&sfp0_i2c {
+	retimer0: retimer@22 {
+		compatible = "ti,ds250df230";
+		reg = <0x22>;
+		#phy-cells = <1>;
+		ti,crosspoint-enable;
+		/* CAL_CLK_IN frequency, the DS250DF230 rate table assumes 30.72 MHz */
+		ti,cal-clock-frequency = <25000000>;
+	};
+};
+
+/*
+ * MAC addresses: Linux reads them from the ONIE TlvInfo EEPROM on the module
+ * (0x57, written with tlvtool) via the nvmem layout below. Every dpmac takes
+ * "Base MAC Address" + index, so the TLV "MAC Addresses" count must be at
+ * least 8. Index map (ascending dpmac number):
+ *   0 dpmac3 (SFP0)   1 dpmac4 (SFP1)   2 dpmac5 (SFP2)    3 dpmac6 (SFP3)
+ *   4 dpmac11 (Port 5) 5 dpmac12 (Port 3) 6 dpmac17 (AR8035) 7 dpmac18 (Port 1)
+ */
+&ddr_i2c {
+	eeprom@57 {
+		nvmem-layout {
+			compatible = "onie,tlv-layout";
+
+			base_mac: mac-address {
+				#nvmem-cell-cells = <1>;
+			};
+		};
+	};
+};
+
+&dpmac17 {
+	nvmem-cells = <&base_mac 6>;
+	nvmem-cell-names = "mac-address";
+};
+
+/*
+ * SFP+ ports are wired to physical SerDes 1 lanes 0-3 (SD1_TX/RX0..3 pins).
+ * On LX2160A SerDes 1 the register lane letters are reversed with respect to
+ * the physical lane numbers (physical lane 0 = lane H = lynx-28g index 7), see
+ * the SerDes 1 protocol table in the RM. With SRDS_PRTCL_S1 = 3, 8 or 21 the
+ * physical lanes 0-3 carry XFI.3-6 (or 25GE.3-6 with 21), i.e. WRIOP MACs 3-6.
+ */
+
+/* SFP0: physical SerDes 1 lane 0 (lane H) -> DS250DF230 (crosspoint) -> SFP */
+&dpmac3 {
+	nvmem-cells = <&base_mac 0>;
+	nvmem-cell-names = "mac-address";
+	sfp = <&sfp0>;
+	managed = "in-band-status";
+	phys = <&serdes_1 7>, <&retimer0 0>, <&retimer0 1>;
+	phy-names = "serdes", "retimer-ch0", "retimer-ch1";
+};
+
+/* SFP1: physical SerDes 1 lane 1 (lane G) */
+&dpmac4 {
+	nvmem-cells = <&base_mac 1>;
+	nvmem-cell-names = "mac-address";
+	sfp = <&sfp1>;
+	managed = "in-band-status";
+	phys = <&serdes_1 6>;
+};
+
+/* SFP2: physical SerDes 1 lane 2 (lane F) */
+&dpmac5 {
+	nvmem-cells = <&base_mac 2>;
+	nvmem-cell-names = "mac-address";
+	sfp = <&sfp2>;
+	managed = "in-band-status";
+	phys = <&serdes_1 5>;
+};
+
+/* SFP3: physical SerDes 1 lane 3 (lane E) */
+&dpmac6 {
+	nvmem-cells = <&base_mac 3>;
+	nvmem-cell-names = "mac-address";
+	sfp = <&sfp3>;
+	managed = "in-band-status";
+	phys = <&serdes_1 4>;
+};
+
+/* Port 5: SerDes 2 lane 0 -> DP83867 Mode 4 (PHY addr 3) */
+&dpmac11 {
+	nvmem-cells = <&base_mac 4>;
+	nvmem-cell-names = "mac-address";
+	phys = <&serdes_2 0>;
+	phy-handle = <&emdio2_phy3>;
+	phy-connection-type = "sgmii";
+};
+
+/* Port 3: SerDes 2 lane 1 -> DP83867 Mode 3 (PHY addr 2) */
+&dpmac12 {
+	nvmem-cells = <&base_mac 5>;
+	nvmem-cell-names = "mac-address";
+	phys = <&serdes_2 1>;
+	phy-handle = <&emdio2_phy2>;
+	phy-connection-type = "sgmii";
+};
+
+/* Port 1: SerDes 2 lane 3 -> DP83867 Mode 1 (PHY addr 0) */
+&dpmac18 {
+	nvmem-cells = <&base_mac 7>;
+	nvmem-cell-names = "mac-address";
+	phys = <&serdes_2 3>;
+	phy-handle = <&emdio2_phy0>;
+	phy-connection-type = "sgmii";
+};
+
+&emdio2 {
+	status = "okay";
+
+	/* Port 1: SerDes 2 lane 3, RX_D0 Mode 1 -> PHY address 0 */
+	emdio2_phy0: ethernet-phy@0 {
+		reg = <0>;
+		ti,dp83867-rxctrl-strap-quirk;
+		enet-phy-lane-swap;
+		ti,ledcr1 = <0x0011>;
+		ti,ledcr2 = <0x0000>;
+	};
+
+	/* Port 2: SerDes 2 lane 2, RX_D0 Mode 2 -> PHY address 1 */
+	emdio2_phy1: ethernet-phy@1 {
+		reg = <1>;
+		ti,dp83867-rxctrl-strap-quirk;
+		enet-phy-lane-swap;
+		ti,ledcr1 = <0x0011>;
+		ti,ledcr2 = <0x0000>;
+	};
+
+	/* Port 3: SerDes 2 lane 1, RX_D0 Mode 3 -> PHY address 2 */
+	emdio2_phy2: ethernet-phy@2 {
+		reg = <2>;
+		ti,dp83867-rxctrl-strap-quirk;
+		enet-phy-lane-swap;
+		ti,ledcr1 = <0x0011>;
+		ti,ledcr2 = <0x0000>;
+	};
+
+	/* Port 5: SerDes 2 lane 0, RX_D0 Mode 4 -> PHY address 3 */
+	emdio2_phy3: ethernet-phy@3 {
+		reg = <3>;
+		ti,dp83867-rxctrl-strap-quirk;
+		enet-phy-lane-swap;
+		ti,ledcr1 = <0x0011>;
+		ti,ledcr2 = <0x0000>;
+	};
+};
+
+&esdhc0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&esdhc0_cd_wp_pins>, <&esdhc0_cmd_data30_clk_vsel_pins>;
+	sd-uhs-sdr104;
+	sd-uhs-sdr50;
+	sd-uhs-sdr25;
+	sd-uhs-sdr12;
+	status = "okay";
+};
+
+/*
+ * SerDes 1 lanes 4-7: PCIe 3.0 (PCIe 16:19 pins on COM7)
+ * - SRDS_PRTCL_S1 = 3:  x4 (lanes 4-7)
+ * - SRDS_PRTCL_S1 = 21: x2 (lanes 4-5; lanes 6-7 are 25GE.9/10, TX disabled by the RCW PBI)
+ * - SRDS_PRTCL_S1 = 8:  not available, the lanes are XFI.7-10
+ */
+&pcie2 {
+	status = "okay";
+};
+
+/* SerDes 3 lanes 0-7: 2x PCIe 3.0 x4 (PCIe 8:15 pins on COM7) */
+&pcie5 {
+	status = "okay";
+};
+
+&pcie6 {
+	status = "okay";
+};
+
+&pcs_mdio3 {
+	status = "okay";
+};
+
+&pcs_mdio4 {
+	status = "okay";
+};
+
+&pcs_mdio5 {
+	status = "okay";
+};
+
+&pcs_mdio6 {
+	status = "okay";
+};
+
+&pcs_mdio11 {
+	status = "okay";
+};
+
+&pcs_mdio12 {
+	status = "okay";
+};
+
+&pcs_mdio18 {
+	status = "okay";
+};
+
+&rgmii_phy1 {
+	/*
+	 * Carrier LEDs are active low: GBE0_ACT# <- LED_ACT, GBE0_LINK# <-
+	 * LED_10_100. LED_ACT is strapped active high (PHY address 1), so the
+	 * AR8035 "link + blink" ACT mode shows as dark-when-idle with flashes
+	 * on activity. Manual LED override (reg 0x19):
+	 *   link up:   0x10c0 = ACT link/activity mode, LED_10_100 forced on
+	 *   link down: 0x0083 = ACT forced inactive,    LED_10_100 forced off
+	 */
+	qca,led-override-link-up = <0x10c0>;
+	qca,led-override-link-down = <0x0083>;
+};
+
+&serdes_1 {
+	/*
+	 * RX pairs of physical lanes 0-2 (SFP0-2) are swapped on the PCB.
+	 * Physical lanes 0,1,2 = lynx-28g lanes 7,6,5 (H,G,F).
+	 */
+	fsl,rx-invert-lane-mask = <0xe0>;
+};
+
+&serdes_2 {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&uart1 {
+	status = "okay";
+};

@@ -219,6 +219,13 @@ int dpaa2_eth_dl_port_add(struct dpaa2_eth_priv *priv)
 	struct devlink_port_attrs attrs = {};
 
 	attrs.flavour = DEVLINK_PORT_FLAVOUR_PHYSICAL;
+	/*
+	 * Use the DPMAC id (the WRIOP MAC number, fixed by the SoC) as the
+	 * physical port number, so that phys_port_name ("p<N>") identifies the
+	 * port independently of DPNI numbering and probe order.
+	 */
+	if (priv->mac)
+		attrs.phys.port_number = priv->mac->attr.id;
 	devlink_port_attrs_set(devlink_port, &attrs);
 	return devlink_port_register(priv->devlink, devlink_port, 0);
 }

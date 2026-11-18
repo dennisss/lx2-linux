@@ -7,6 +7,59 @@
  * Author: Matus Ujhelyi <ujhelyi.m@gmail.com>
  */
 
+/*
+ * AR8035 LED register notes (SolidRun LX2160A COM7 + "router" carrier)
+ * ====================================================================
+ *
+ * The public AR8035 datasheet (Atheros, March 2011) only documents the LED
+ * on/off blink times in reg 0x18 and lists reg 0x19 as "Reserved". The
+ * notes below come from probing a live PHY (MDIO bus 0x8b96000, PHY addr 1,
+ * 1000BASE-T link) and watching the carrier LEDs. "lit"/"dark" describe the
+ * carrier LEDs, not the pin levels.
+ *
+ * Wiring and straps
+ *   - Carrier LEDs are active low: GBE0_ACT# <- LED_ACT (pin 21),
+ *     GBE0_LINK# <- LED_10_100 (pin 24). LED_1000 (pin 22) is not used.
+ *   - LED_ACT polarity comes from its own strap, which is also PHYADDRESS2.
+ *     PHY address 1 means LED_ACT is strapped low = active high, so on this
+ *     carrier LED_ACT shows inverted: lit when "inactive", dark when "active".
+ *   - LED_10_100 polarity follows the LED_1000 (MODE2) strap. Observed to be
+ *     active low (it matches the carrier).
+ *   - In hardware mode LED_10_100 only lights for a 10/100 link, so it stays
+ *     dark on a 1000M link.
+ *
+ * Reg 0x18 (LED control): reset/observed value 0x3200, writable mask 0xf71f
+ *   [15]    1 = LEDs disabled. ACT goes to its inactive level (solid lit).
+ *   [14:12] LED on time, [10:8] LED off time (per datasheet).
+ *   [4:3]   undocumented. No visible effect on either LED at 1000M.
+ *   [2]     undocumented. 1 = ACT blinks fast even with no traffic
+ *           (unless [1:0] = 11).
+ *   [1:0]   undocumented. 11 = ACT held at its inactive level (solid lit);
+ *           an override in 0x19[1:0] still wins over this. 01/10 had no
+ *           visible effect.
+ *
+ * Reg 0x19 (manual LED override, undocumented): reset 0x2000, all bits
+ *   writable except [13], which always reads back as 1.
+ *   [12]    ACT mode: 0 = activity only (inactive when idle, pulses on
+ *           traffic, so lit/flickering here), 1 = "on when linked, blink on
+ *           activity" (dark when idle, lit flashes on traffic here; lit with
+ *           no link).
+ *   [7:6]   LED_10_100: 00 = normal (10/100 link only), 01 = forced fast
+ *           blink (independent of traffic; with no traffic ACT was also seen
+ *           blinking fast), 10 = forced off, 11 = forced on.
+ *   [3:0]   [1:0] = 11 or [3:2] = 11 forces ACT to its active level (dark
+ *           here). A single bit 0 or 2 (01) gave a fast ACT blink. A single
+ *           bit 1 or 3 (10) had no visible change.
+ *   other   bits 4,5,8-11,14,15 (singly and as pairs 5:4, 9:8, 11:10, 15:14)
+ *           had no visible effect. They may control the unwired LED_1000.
+ *
+ * Board setting (DT "qca,led-override-link-{up,down}", see
+ * at8035_link_change_notify()):
+ *   link up:   0x10c0  ACT link/activity mode (dark when idle, flashes on
+ *                      traffic), LED_10_100 forced on (link LED at any speed)
+ *   link down: 0x0083  ACT forced active (dark), LED_10_100 forced off
+ */
+
 #include <linux/phy.h>
 #include <linux/module.h>
 #include <linux/string.h>
@@ -25,6 +78,7 @@
 
 #include "qcom.h"
 
+#define AT803X_LED_OVERRIDE			0x19
 #define AT803X_LED_CONTROL			0x18
 
 #define AT803X_REG_CHIP_CONFIG			0x1f
@@ -164,6 +218,9 @@ struct at803x_priv {
 	bool is_1000basex;
 	struct regulator_dev *vddio_rdev;
 	struct regulator_dev *vddh_rdev;
+	bool led_override;
+	u16 led_override_up;
+	u16 led_override_down;
 };
 
 struct at803x_context {
@@ -483,6 +540,7 @@ static int at803x_hibernation_mode_config(struct phy_device *phydev)
 
 static int at803x_config_init(struct phy_device *phydev)
 {
+	struct at803x_priv *priv = phydev->priv;
 	int ret;
 
 	/* The RX and TX delay default is:
@@ -517,6 +575,14 @@ static int at803x_config_init(struct phy_device *phydev)
 	ret = at803x_hibernation_mode_config(phydev);
 	if (ret < 0)
 		return ret;
+
+	if (priv->led_override) {
+		ret = phy_write(phydev, AT803X_LED_OVERRIDE,
+				phydev->link ? priv->led_override_up :
+					       priv->led_override_down);
+		if (ret < 0)
+			return ret;
+	}
 
 	/* Ar803x extended next page bit is enabled by default. Cisco
 	 * multigig switches read this bit and attempt to negotiate 10Gbps
@@ -958,7 +1024,9 @@ static int at8032_cable_test_get_status(struct phy_device *phydev,
 
 static int at8035_parse_dt(struct phy_device *phydev)
 {
+	struct device_node *node = phydev->mdio.dev.of_node;
 	struct at803x_priv *priv = phydev->priv;
+	u32 val;
 
 	/* Mask is set by the generic at803x_parse_dt
 	 * if property is set. Assume property is set
@@ -978,6 +1046,23 @@ static int at8035_parse_dt(struct phy_device *phydev)
 		 */
 		priv->clk_25m_reg &= AT8035_CLK_OUT_MASK;
 		priv->clk_25m_mask &= AT8035_CLK_OUT_MASK;
+	}
+
+	/* Optional manual LED override values for link up / link down */
+	if (IS_ENABLED(CONFIG_OF_MDIO) && node) {
+		if (!of_property_read_u32(node, "qca,led-override-link-up",
+					  &val)) {
+			priv->led_override_up = val;
+			priv->led_override_down = val;
+			priv->led_override = true;
+		}
+		if (!of_property_read_u32(node, "qca,led-override-link-down",
+					  &val)) {
+			priv->led_override_down = val;
+			if (!priv->led_override)
+				priv->led_override_up = val;
+			priv->led_override = true;
+		}
 	}
 
 	return 0;
@@ -1098,6 +1183,21 @@ static int ipq5018_probe(struct phy_device *phydev)
 	return 0;
 }
 
+/*
+ * Boards whose LED wiring does not match the PHY's strap-defined LED
+ * polarity/function can program a different manual LED override value for
+ * the link-up and link-down states (e.g. to turn LEDs off without a link).
+ */
+static void at8035_link_change_notify(struct phy_device *phydev)
+{
+	struct at803x_priv *priv = phydev->priv;
+
+	if (priv->led_override)
+		phy_write(phydev, AT803X_LED_OVERRIDE,
+			  phydev->link ? priv->led_override_up :
+					 priv->led_override_down);
+}
+
 static struct phy_driver at803x_driver[] = {
 {
 	/* Qualcomm Atheros AR8035 */
@@ -1107,6 +1207,7 @@ static struct phy_driver at803x_driver[] = {
 	.probe			= at8035_probe,
 	.config_aneg		= at803x_config_aneg,
 	.config_init		= at803x_config_init,
+	.link_change_notify	= at8035_link_change_notify,
 	.soft_reset		= genphy_soft_reset,
 	.set_wol		= at803x_set_wol,
 	.get_wol		= at803x_get_wol,

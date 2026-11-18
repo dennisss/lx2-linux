@@ -117,19 +117,22 @@ static int onie_tlv_add_cells(struct device *dev, struct nvmem_device *nvmem,
 			break;
 		}
 
+		/*
+		 * Skip types without a known cell name (e.g. vendor specific
+		 * codes), but always advance to the next TLV.
+		 */
 		cell.name = onie_tlv_cell_name(tlv.type);
-		if (!cell.name)
-			continue;
+		if (cell.name) {
+			cell.offset = hdr_len + offset + sizeof(tlv.type) + sizeof(tlv.len);
+			cell.bytes = tlv.len;
+			cell.np = of_get_child_by_name(layout, cell.name);
+			cell.read_post_process = onie_tlv_read_cb(tlv.type, data + offset + sizeof(tlv));
 
-		cell.offset = hdr_len + offset + sizeof(tlv.type) + sizeof(tlv.len);
-		cell.bytes = tlv.len;
-		cell.np = of_get_child_by_name(layout, cell.name);
-		cell.read_post_process = onie_tlv_read_cb(tlv.type, data + offset + sizeof(tlv));
-
-		ret = nvmem_add_one_cell(nvmem, &cell);
-		if (ret) {
-			of_node_put(layout);
-			return ret;
+			ret = nvmem_add_one_cell(nvmem, &cell);
+			if (ret) {
+				of_node_put(layout);
+				return ret;
+			}
 		}
 
 		offset += sizeof(tlv) + tlv.len;
